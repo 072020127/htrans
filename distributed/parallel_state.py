@@ -866,7 +866,7 @@ class GroupCoordinator:
                         src_ptr = cpu_tensor.data_ptr()
 
                         cpu_tensor = self.server[self.rank].recv_tensor()
-                        self.memories[self.rank].copyDeviceToHost(dst_ptr, src_ptr, nbytes)
+                        self.memories[self.rank].copyHostToDevice(dst_ptr, src_ptr, nbytes)
                 else:
                     if tensor.is_cpu:
                         # use metadata_group for CPU tensors
