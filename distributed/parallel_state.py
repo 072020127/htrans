@@ -599,8 +599,8 @@ class GroupCoordinator:
         # Send object size
 
         if self.use_uccl_p2p:
-            self.clients[dst=self.ranks[dst]].send_tensor(size_tensor)
-            self.clients[dst=self.ranks[dst]].send_tensor(object_tensor)
+            self.clients[self.ranks[dst]].send_tensor(size_tensor)
+            self.clients[self.ranks[dst]].send_tensor(object_tensor)
 
         else:
             torch.distributed.send(size_tensor,
@@ -630,12 +630,12 @@ class GroupCoordinator:
         Receive object size
 
         if self.use_uccl_p2p:
-            size_tensor = self.clients[dst=self.ranks[dst]].recv_tensor()
+            size_tensor = self.clients[self.ranks[dst]].recv_tensor()
             object_tensor = torch.empty(  # type: ignore[call-overload]
                 size_tensor.item(),  # type: ignore[arg-type]
                 dtype=torch.uint8,
                 device="cpu")
-            object_tensor = self.clients[dst=self.ranks[dst]].recv_tensor()
+            object_tensor = self.clients[self.ranks[dst]].recv_tensor()
         else:
             rank_size = torch.distributed.recv(size_tensor,
                                             src=self.ranks[src],
