@@ -1,0 +1,1 @@
+python3 -m vllm.entrypoints.openai.api_server   --model /root/.cache/huggingface/modelscope/hub/models/Qwen/Qwen2-7b   --port 8003   --dtype half   --max_model_len 4096   --pipeline_parallel_size 2   --distributed_executor_backend ray   --api-key mysecretkey123  --enforce-eager
