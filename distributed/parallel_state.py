@@ -23,7 +23,7 @@ If you only need to use the distributed environment without model/pipeline
  steps.
 """
 from torch._C._distributed_c10d import Store
-from tcp_blocking import TCPServer, TCPClient
+from .tcp_blocking import TCPServer, TCPClient
 import netifaces
 import contextlib
 import gc
@@ -40,7 +40,8 @@ import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 import os
-import hmc
+import threading
+# import hmc
 
 
 import vllm.envs as envs
@@ -202,7 +203,7 @@ if supports_custom_op():
         key = f"RANK_{rank}_IP"
         store.set(key, local_ip.encode("utf-8"))
 
-    def barrier(store: Store, world_size: int):
+    def barrier_ip(store: Store, world_size: int):
         """
         简易 barrier：每个 rank 对同一个 bar_key 累加一次，
         然后 busy‑wait 直到看到值 == world_size。
@@ -344,35 +345,49 @@ class GroupCoordinator:
         #     for i in range(torch.cuda.device_count()):
         #         devices.append(torch.device(f'cuda:{i}'))
                             
-        self.use_uccl_p2p = value = os.environ.get('USE_UCCL_P2P', True)
+        # self.use_uccl_p2p = value = os.environ.get('USE_UCCL_P2P', True)
+        self.use_uccl_p2p = True
         store = c10d._get_default_store()
         publish_ip(self.rank, self.world_size, store)
-        barrier(store, self.world_size)
+        barrier_ip(store, self.world_size)
         logger.info(f"self.world_size: {self.world_size}")
+
+
         self.ip_map = collect_ip_map(self.world_size, store)
 
-        server_base_port = 50000
-        client_base_port = 60000
-        self.servers: Dict[int, TCPServer] = {}
-        self.clients: Dict[int, TCPClient] = {}
-        self.memories: Dict[int, hmc.Memory] = {}
+        # server_base_port = 50000
+        # client_base_port = 60000
+        # self.servers: Dict[int, TCPServer] = {}
+        # self.clients: Dict[int, TCPClient] = {}
+        # # self.memories: Dict[int, hmc.Memory] = {}
 
-        for r, ip in self.ip_map.items():
-            server_port = server_base_port + r
-            client_port = client_base_port + r
-            if self.rank == r:
-                server = TCPServer(ip, server_port)
-                server.register()
-                self.servers[r] = server
-            client = TCPClient(ip, client_base_port)
-            self.clients[r] = client
-            self.memories[r] = hmc.Memory(r, hmc.MemoryType.DEFAULT)
+        # for r, ip in self.ip_map.items():
+        #     server_port = server_base_port + r
+        #     client_port = client_base_port + r
+        #     if self.rank == r:
+        #         server = TCPServer("0.0.0.0", server_port)
+        #         logger.info("\nserver\n")
+        #         def accept_in_bg():
+        #             server.register()    # register 包含 accept；会阻塞但在后台线程
+        #         t = threading.Thread(target=accept_in_bg, daemon=True)
+        #         t.start()
+        #         self.servers[r] = server
+        #     client = TCPClient(ip, server_port)
+        #     self.clients[r] = client
+        #     # self.memories[r] = hmc.Memory(r, hmc.MemoryType.DEFAULT)
 
-        barrier(store, self.world_size)
+        # import time
+        # time.sleep(10)
 
-        for c in self.clients:
-            client.register()
+        # logger.info("\nenter collect\n")
+        # barrier_ip(store, self.world_size)
+        # logger.info("\nexit collect\n")
 
+        # for r, client in self.clients.items():
+        #     if client is not None:
+        #         client.register()
+
+        # logger.info("\nexit 4register\n")
 
     @property
     def first_rank(self):
@@ -582,7 +597,8 @@ class GroupCoordinator:
     def send_object(self, obj: Any, dst: int) -> None:
         """Send the input object list to the destination rank."""
         """NOTE: `dst` is the local rank of the destination rank."""
-
+        logger.info("send_object")
+        print("send_object")
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         assert dst != self.rank_in_group, (
@@ -591,7 +607,7 @@ class GroupCoordinator:
 
         # Serialize object to tensor and get the size as well
         object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
-
+        logger.info(" 609 object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8) ")
         size_tensor = torch.tensor([object_tensor.numel()],
                                    dtype=torch.long,
                                    device="cpu")
@@ -599,8 +615,16 @@ class GroupCoordinator:
         # Send object size
 
         if self.use_uccl_p2p:
-            self.clients[self.ranks[dst]].send_tensor(size_tensor)
-            self.clients[self.ranks[dst]].send_tensor(object_tensor)
+            # self.clients[self.ranks[dst]].send_tensor(size_tensor)
+            # self.clients[self.ranks[dst]].send_tensor(object_tensor)
+            torch.distributed.send(size_tensor,
+                                dst=self.ranks[dst],
+                                group=self.cpu_group)
+
+            # Send object
+            torch.distributed.send(object_tensor,
+                                dst=self.ranks[dst],
+                                group=self.cpu_group)
 
         else:
             torch.distributed.send(size_tensor,
@@ -611,13 +635,14 @@ class GroupCoordinator:
             torch.distributed.send(object_tensor,
                                 dst=self.ranks[dst],
                                 group=self.cpu_group)
-
+        logger.info("exiting send_object")
+        print("exiting send_object")
         return None
 
     def recv_object(self, src: int) -> Any:
         """Receive the input object list from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
-
+        logger.info("start recv_object")
         assert src < self.world_size, f"Invalid src rank ({src})"
 
         assert src != self.rank_in_group, (
@@ -627,15 +652,31 @@ class GroupCoordinator:
         size_tensor = torch.empty(1, dtype=torch.long, device="cpu")
 
 
-        Receive object size
+        # Receive object size
 
         if self.use_uccl_p2p:
-            size_tensor = self.clients[self.ranks[dst]].recv_tensor()
+            # size_tensor = self.clients[self.ranks[dst]].recv_tensor()
+            # object_tensor = torch.empty(  # type: ignore[call-overload]
+            #     size_tensor.item(),  # type: ignore[arg-type]
+            #     dtype=torch.uint8,
+            #     device="cpu")
+            # object_tensor = self.clients[self.ranks[dst]].recv_tensor()
+            rank_size = torch.distributed.recv(size_tensor,
+                                            src=self.ranks[src],
+                                            group=self.cpu_group)
+
+            # Tensor to receive serialized objects into.
             object_tensor = torch.empty(  # type: ignore[call-overload]
                 size_tensor.item(),  # type: ignore[arg-type]
                 dtype=torch.uint8,
                 device="cpu")
-            object_tensor = self.clients[self.ranks[dst]].recv_tensor()
+
+            rank_object = torch.distributed.recv(object_tensor,
+                                                src=self.ranks[src],
+                                                group=self.cpu_group)
+
+            assert rank_object == rank_size, (
+                "Received object sender rank does not match the size sender rank.")
         else:
             rank_size = torch.distributed.recv(size_tensor,
                                             src=self.ranks[src],
@@ -655,7 +696,7 @@ class GroupCoordinator:
                 "Received object sender rank does not match the size sender rank.")
 
         obj = pickle.loads(object_tensor.numpy().tobytes())
-
+        logger.info("exiting recv_object")
         return obj
 
     def broadcast_tensor_dict(
@@ -789,26 +830,37 @@ class GroupCoordinator:
 
             if self.use_uccl_p2p:
                 if tensor.is_cpu:
-                    self.clients[self.ranks[dst]].send_tensor(tensor)
+                    # self.clients[self.ranks[dst]].send_tensor(tensor)
+                    torch.distributed.send(tensor,
+                                        dst=self.ranks[dst],
+                                        group=metadata_group)
                 else:
-                    nbytes  = tensor.numel() * tensor.element_size()
-                    cpu_tensor = torch.empty_like(tensor, device='cpu')
-                    src_ptr = tensor.data_ptr()
-                    dst_ptr = cpu_tensor.data_ptr()
-
-                    self.memories[self.rank].copyDeviceToHost(dst_ptr, src_ptr, nbytes)
-                    self.clients[self.ranks[dst]].send_tensor(cpu_tensor)
-            
-            if tensor.is_cpu:
-                # use metadata_group for CPU tensors
-                torch.distributed.send(tensor,
-                                       dst=self.ranks[dst],
-                                       group=metadata_group)
+                    # nbytes  = tensor.numel() * tensor.element_size()
+                    # cpu_tensor = torch.empty_like(tensor, device='cpu')
+                    # src_ptr = tensor.data_ptr()
+                    # dst_ptr = cpu_tensor.data_ptr()
+                    logger.info("start cpu_tensor = tensor.cpu()")
+                    cpu_tensor = tensor.cpu()
+                    logger.info("end cpu_tensor = tensor.cpu()")
+                    # self.memories[self.rank].copyDeviceToHost(dst_ptr, src_ptr, nbytes)
+                    # self.clients[self.ranks[dst]].send_tensor(cpu_tensor)
+                    logger.info("start torch.distributed.send")
+                    torch.distributed.send(cpu_tensor,
+                                        dst=self.ranks[dst],
+                                        group=metadata_group)
+                    logger.info("end torch.distributed.send")
             else:
-                # use group for GPU tensors
-                torch.distributed.send(tensor,
-                                       dst=self.ranks[dst],
-                                       group=group)
+                if tensor.is_cpu:
+                    # use metadata_group for CPU tensors
+                    torch.distributed.send(tensor,
+                                        dst=self.ranks[dst],
+                                        group=metadata_group)
+                else:
+                    # use group for GPU tensors
+                    torch.distributed.send(tensor,
+                                        dst=self.ranks[dst],
+                                        group=group)
+        logger.info("exiting send_tensor_dict")
         return None
 
     def recv_tensor_dict(
@@ -858,15 +910,33 @@ class GroupCoordinator:
                 
                 if self.use_uccl_p2p:
                     if tensor.is_cpu:
-                        tensor = self.server[self.rank].recv()
+                        # tensor = self.server[self.rank].recv()
+                        torch.distributed.recv(tensor,
+                                            src=self.ranks[src],
+                                            group=metadata_group)
                     else:
-                        nbytes  = tensor.numel() * tensor.element_size()
+                        # nbytes  = tensor.numel() * tensor.element_size()
                         cpu_tensor = torch.empty_like(tensor, device='cpu')
-                        dst_ptr = tensor.data_ptr()
-                        src_ptr = cpu_tensor.data_ptr()
+                        # dst_ptr = tensor.data_ptr()
+                        # src_ptr = cpu_tensor.data_ptr()
+                        # cpu_buf = torch.empty(tensor.size(), dtype=tensor.dtype, device='cpu')
+                        # nbytes = tensor.numel() * tensor.element_size()
+                        logger.info("start torch.distributed.recv")
+                        torch.distributed.recv(cpu_tensor,
+                                            src=self.ranks[src],
+                                            group=metadata_group)
 
-                        cpu_tensor = self.server[self.rank].recv_tensor()
-                        self.memories[self.rank].copyHostToDevice(dst_ptr, src_ptr, nbytes)
+
+                        # torch.distributed.recv(tensor,
+                        #                     src=self.ranks[src],
+                        #                     group=metadata_group)
+                        logger.info("recv device = torch.device(f'cuda:{local_rank}')")
+                        # cpu_tensor = self.server[self.rank].recv_tensor()
+                        device = torch.device(f'cuda:{self.local_rank}')
+                        tensor = cpu_tensor.to(device)
+
+
+                        # self.memories[self.rank].copyHostToDevice(dst_ptr, src_ptr, nbytes)
                 else:
                     if tensor.is_cpu:
                         # use metadata_group for CPU tensors
@@ -887,6 +957,7 @@ class GroupCoordinator:
                 tensor_dict[key] = tensor
             else:
                 tensor_dict[key] = value
+        logger.info("recv_object")
         return tensor_dict
 
     def barrier(self):
