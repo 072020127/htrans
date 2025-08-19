@@ -635,8 +635,6 @@ class GroupCoordinator:
             torch.distributed.send(object_tensor,
                                 dst=self.ranks[dst],
                                 group=self.cpu_group)
-        logger.info("exiting send_object")
-        print("exiting send_object")
         return None
 
     def recv_object(self, src: int) -> Any:
@@ -696,7 +694,6 @@ class GroupCoordinator:
                 "Received object sender rank does not match the size sender rank.")
 
         obj = pickle.loads(object_tensor.numpy().tobytes())
-        logger.info("exiting recv_object")
         return obj
 
     def broadcast_tensor_dict(
@@ -839,16 +836,12 @@ class GroupCoordinator:
                     # cpu_tensor = torch.empty_like(tensor, device='cpu')
                     # src_ptr = tensor.data_ptr()
                     # dst_ptr = cpu_tensor.data_ptr()
-                    logger.info("start cpu_tensor = tensor.cpu()")
                     cpu_tensor = tensor.cpu()
-                    logger.info("end cpu_tensor = tensor.cpu()")
                     # self.memories[self.rank].copyDeviceToHost(dst_ptr, src_ptr, nbytes)
                     # self.clients[self.ranks[dst]].send_tensor(cpu_tensor)
-                    logger.info("start torch.distributed.send")
                     torch.distributed.send(cpu_tensor,
                                         dst=self.ranks[dst],
                                         group=metadata_group)
-                    logger.info("end torch.distributed.send")
             else:
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
@@ -860,7 +853,6 @@ class GroupCoordinator:
                     torch.distributed.send(tensor,
                                         dst=self.ranks[dst],
                                         group=group)
-        logger.info("exiting send_tensor_dict")
         return None
 
     def recv_tensor_dict(
@@ -921,7 +913,6 @@ class GroupCoordinator:
                         # src_ptr = cpu_tensor.data_ptr()
                         # cpu_buf = torch.empty(tensor.size(), dtype=tensor.dtype, device='cpu')
                         # nbytes = tensor.numel() * tensor.element_size()
-                        logger.info("start torch.distributed.recv")
                         torch.distributed.recv(cpu_tensor,
                                             src=self.ranks[src],
                                             group=metadata_group)
@@ -930,7 +921,6 @@ class GroupCoordinator:
                         # torch.distributed.recv(tensor,
                         #                     src=self.ranks[src],
                         #                     group=metadata_group)
-                        logger.info("recv device = torch.device(f'cuda:{local_rank}')")
                         # cpu_tensor = self.server[self.rank].recv_tensor()
                         device = torch.device(f'cuda:{self.local_rank}')
                         tensor = cpu_tensor.to(device)
@@ -957,7 +947,6 @@ class GroupCoordinator:
                 tensor_dict[key] = tensor
             else:
                 tensor_dict[key] = value
-        logger.info("recv_object")
         return tensor_dict
 
     def barrier(self):
